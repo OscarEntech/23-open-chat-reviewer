@@ -15,20 +15,71 @@ from __future__ import annotations
 
 import datetime as dt
 import html
+import json
+import os
 from collections import defaultdict
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import psycopg
 
-PRICES = {
-    "claude-opus-5":   {"inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50},
-    "claude-opus-4-8": {"inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50},
-    "claude-sonnet-5": {"inp": 2.0,  "out": 10.0, "cw5m": 2.50,  "cw1h": 4.00, "read": 0.20},
-    "claude-fable-5":  {"inp": 10.0, "out": 50.0, "cw5m": 12.50, "cw1h": 20.0, "read": 1.00},
+DEFAULT_PRICING = {
+    "as_at": "2026-09-04",
+    "source": "Anthropic published API pricing",
+    "display_currency": "AUD",
+    "rate_per_usd": 1.395,
+    "prices_usd_per_mtok": {
+        "claude-opus-5":   {"inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50},
+        "claude-opus-4-8": {"inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50},
+        "claude-sonnet-5": {"inp": 2.0,  "out": 10.0, "cw5m": 2.50,  "cw1h": 4.00, "read": 0.20},
+        "claude-fable-5":  {"inp": 10.0, "out": 50.0, "cw5m": 12.50, "cw1h": 20.0, "read": 1.00},
+    },
 }
 
-AUD_PER_USD = 1.395          # edit to taste; the report states whatever you set
+# Operators edit this file, not the code. Missing or malformed falls back to the
+# defaults above and the page says so rather than failing.
+PRICING_PATH = Path(__file__).resolve().parents[2] / ".chatreview" / "token-pricing.json"
+STALE_AFTER_DAYS = 90
 
-TZ = "Australia/Perth"
+
+def load_pricing() -> dict:
+    """Read the pricing file, falling back to the built in defaults."""
+    config = dict(DEFAULT_PRICING)
+    config["loaded_from"] = "built in defaults"
+    try:
+        if PRICING_PATH.is_file():
+            raw = json.loads(PRICING_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                merged = dict(DEFAULT_PRICING)
+                merged.update({k: v for k, v in raw.items() if v is not None})
+                merged["loaded_from"] = str(PRICING_PATH)
+                config = merged
+    except (OSError, ValueError) as exc:
+        config["load_error"] = f"{type(exc).__name__}: {exc}"
+    return config
+
+
+def pricing_age_days(config: dict) -> int | None:
+    try:
+        stamped = dt.date.fromisoformat(str(config.get("as_at", "")))
+    except ValueError:
+        return None
+    return (dt.datetime.now(ZoneInfo(resolve_timezone())).date() - stamped).days
+
+
+def resolve_timezone() -> str:
+    """Match the project's own resolution order."""
+    name = (os.environ.get("CHATREVIEW_TIMEZONE") or os.environ.get("TZ") or "UTC").strip()
+    try:
+        ZoneInfo(name)
+    except Exception:  # noqa: BLE001 - an unknown zone must not break the report
+        return "UTC"
+    return name
+
+
+PRICES = {m: v for m, v in DEFAULT_PRICING["prices_usd_per_mtok"].items()}
+AUD_PER_USD = float(DEFAULT_PRICING["rate_per_usd"])
+TZ = "UTC"
 
 CAT_LIGHT = ["#0B5299", "#C43F0B", "#6B4E9E", "#15803D"]
 
@@ -121,7 +172,7 @@ def bars_horizontal(pairs, colors=None, width=760, row_h=30, label_w=190):
         y = i * row_h
         bw = max(2.0, track * (v / top))
         fill = (f' data-ci="{i}" style="fill:{colors[i % len(colors)]}"') if colors else ""
-        cls = "bar" if colors else "bar"
+        cls = "bar"
         out.append(
             f'<text x="0" y="{y + row_h / 2 + 4:.0f}" class="rowlabel">{esc(label[:34])}</text>'
             f'<rect x="{label_w}" y="{y + 5:.0f}" width="{bw:.1f}" height="{row_h - 12:.0f}" '
@@ -142,7 +193,7 @@ def table(headers, rows, aligns=None) -> str:
     )
     return f'<div class="tw"><table><thead><tr>{h}</tr></thead><tbody>{body}</tbody></table></div>'
 
-def build(rows: list[dict]) -> str:
+def build(rows: list[dict], pricing: dict | None = None) -> str:
     if not rows:
         raise ValueError("no usage rows")
 
@@ -232,17 +283,33 @@ def build(rows: list[dict]) -> str:
         f'<span class="lg"><i style="background:{CAT_LIGHT[i]}" data-dark="{CAT_DARK[i]}"></i>{esc(s)}</span>'
         for i, s in enumerate(SERIES)
     )
-    warn = ""
+    pricing = pricing or {}
+    notices = []
     if unknown:
-        warn = (
+        notices.append(
             '<div class="callout warn"><b>Unpriced models.</b> '
             + esc(", ".join(unknown))
             + " carry no price entry, so their tokens are counted but cost nothing. "
-            "Add them to PRICES at the top of the script.</div>"
+            "Add them to the pricing file to include them.</div>"
         )
+    age = pricing_age_days(pricing) if pricing else None
+    stamped = esc(str(pricing.get("as_at", "unknown")))
+    if age is not None and age > STALE_AFTER_DAYS:
+        notices.append(
+            f'<div class="callout warn"><b>Prices are {age} days old.</b> They were last '
+            f"confirmed on {stamped}, and neither the rates nor the exchange rate update "
+            "themselves. Check them against current published pricing before quoting these "
+            f"figures. Edit <code>{esc(str(PRICING_PATH))}</code>.</div>"
+        )
+    if pricing.get("load_error"):
+        notices.append(
+            '<div class="callout warn"><b>The pricing file could not be read</b>, so built in '
+            f"defaults were used. {esc(str(pricing['load_error']))}</div>"
+        )
+    warn = "".join(notices)
 
     return PAGE.format(
-        generated=dt.datetime.now().strftime("%d %B %Y, %H:%M"),
+        generated=dt.datetime.now(ZoneInfo(TZ)).strftime("%d %B %Y, %H:%M"),
         rate=f"{AUD_PER_USD:.3f}",
         grand=money(grand), tokens=compact(total_tokens),
         msgs=f"{msgs:,}", perday=money(grand / active),
@@ -253,6 +320,9 @@ def build(rows: list[dict]) -> str:
         legend=legend, warn=warn,
         t_month=t_month, t_week=t_week, t_day=t_day, t_sess=t_sess, t_tok=t_tok,
         cat_light=",".join(CAT_LIGHT), cat_dark=",".join(CAT_DARK),
+        as_at=esc(str(pricing.get('as_at', 'an unknown date'))),
+        loaded_from=esc(str(pricing.get('loaded_from', 'built in defaults'))),
+        tzname=esc(TZ),
     )
 
 PAGE = """<!doctype html>
@@ -393,8 +463,9 @@ with activity on {active}.</p>
 <div class="card"><h3>Most expensive sessions</h3>{t_sess}</div>
 
 <footer>
-  <p>Prices are Anthropic's published per-million-token API rates, with cache writes split by their
-  5-minute and 1-hour TTLs and cache reads priced separately.</p>
+  <p>Prices are per-million-token API rates as published by Anthropic, with cache writes split by
+  their 5-minute and 1-hour TTLs and cache reads priced separately. Last confirmed {as_at},
+  loaded from {loaded_from}. Timezone {tzname}, from CHATREVIEW_TIMEZONE.</p>
   <p>If your Claude usage sits under a subscription rather than API billing, treat these figures as
   replacement cost, what the same work would have cost at list price, not money you paid.</p>
   <p>Regenerate any time with <code>uv run python ~/token-report.py</code> after a sync.</p>
@@ -484,6 +555,12 @@ ORDER BY 1
 
 def render_html(database_url: str) -> str:
     """Top up the usage table, then render the report. Safe to call per request."""
+    global PRICES, AUD_PER_USD, TZ
+    pricing = load_pricing()
+    PRICES = dict(pricing.get("prices_usd_per_mtok") or DEFAULT_PRICING["prices_usd_per_mtok"])
+    AUD_PER_USD = float(pricing.get("rate_per_usd") or DEFAULT_PRICING["rate_per_usd"])
+    TZ = resolve_timezone()
+
     with psycopg.connect(database_url) as conn, conn.cursor() as cur:
         cur.execute(DDL)
         cur.execute("SELECT coalesce(max(event_id), 0) FROM token_report.usage")
@@ -500,4 +577,4 @@ def render_html(database_url: str) -> str:
             "<h1>No usage data yet</h1><p>The archive holds no assistant messages "
             "carrying token counts. Run a sync, then reload.</p></body>"
         )
-    return build(rows)
+    return build(rows, pricing)

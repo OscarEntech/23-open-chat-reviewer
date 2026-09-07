@@ -1,0 +1,13 @@
+{
+  "_comment": "Edit this file to keep the cost report honest. Update as_at whenever you confirm the numbers; the page warns you once it is more than 90 days old.",
+  "as_at": "2026-09-04",
+  "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+  "display_currency": "AUD",
+  "rate_per_usd": 1.395,
+  "prices_usd_per_mtok": {
+    "claude-opus-5":   { "inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50 },
+    "claude-opus-4-8": { "inp": 5.0,  "out": 25.0, "cw5m": 6.25,  "cw1h": 10.0, "read": 0.50 },
+    "claude-sonnet-5": { "inp": 2.0,  "out": 10.0, "cw5m": 2.50,  "cw1h": 4.00, "read": 0.20 },
+    "claude-fable-5":  { "inp": 10.0, "out": 50.0, "cw5m": 12.50, "cw1h": 20.0, "read": 1.00 }
+  }
+}
