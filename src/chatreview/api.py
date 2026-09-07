@@ -1136,7 +1136,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     @app.get("/token-report", include_in_schema=False)
     def token_report_panel() -> Response:
-        """Live token cost report. Local addition; see chatreview/token_panel.py."""
+        """Render the token cost report as standalone HTML."""
         from chatreview.token_panel import render_html
 
         return Response(render_html(settings.database_url), media_type="text/html; charset=utf-8")
